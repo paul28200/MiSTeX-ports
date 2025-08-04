@@ -423,10 +423,12 @@ begin
 	                 std_logic_vector(unsigned(PC) + ("1"&x"6BD")) when VER="011" else
 	                 std_logic_vector(unsigned(PC) + ("1"&x"D8B"));
 
-	PROG_ROM : entity work.spram_sz generic map(13, 24, 8096, "rtl/chip/DSP/dsp11b23410_p.mif")
+	PROG_ROM : entity work.spram generic map(13, 24, "chip/DSP/dsp11b23410_p.mif")
 	port map(
 		clock		=> CLK,
 		address	=> PROG_ROM_ADDR,
+		enable => '1',
+		cs => '1',
 		q			=> PROG_ROM_Q
 	);
 
@@ -436,10 +438,13 @@ begin
 	                 std_logic_vector(unsigned(RP( 9 downto 0)) + ("0"&x"C00")) when VER="010" else
 	                 std_logic_vector(unsigned(RP( 9 downto 0)) + ("1"&x"000")) when VER="011" else
 	                 std_logic_vector(unsigned(RP(10 downto 0)) + ("1"&x"400"));
-	DATA_ROM : entity work.spram_sz generic map(13, 16, 7168, "rtl/chip/DSP/dsp11b23410_d.mif")
+
+	DATA_ROM : entity work.spram generic map(13, 16, "chip/DSP/dsp11b23410_d.mif")
 	port map(
 		clock		=> CLK,
 		address	=> DATA_ROM_ADDR,
+		enable => '1',
+		cs => '1',
 		q			=> DATA_ROM_Q
 	);
 	
@@ -451,10 +456,14 @@ begin
 	port map(
 		clock			=> CLK,
 		address_a	=> DATA_RAM_ADDR_A,
+		enable_a	=> '1',
+		cs_a		=> '1',
 		data_a		=> OP_ID(7 downto 0),
 		wren_a		=> DATA_RAM_WE,
 		q_a			=> DATA_RAM_Q_A(7 downto 0),
 		address_b	=> DATA_RAM_ADDR_B,
+		enable_b	=> '1',
+		cs_b		=> '1',
 		data_b		=> DI,
 		wren_b		=> not WR_N and DP_SEL and not DP_ADDR(0),
 		q_b			=> DATA_RAM_Q_B(7 downto 0)
@@ -464,10 +473,14 @@ begin
 	port map(
 		clock			=> CLK,
 		address_a	=> DATA_RAM_ADDR_A,
+		enable_a	=> '1',
+		cs_a		=> '1',
 		data_a		=> OP_ID(15 downto 8),
 		wren_a		=> DATA_RAM_WE,
 		q_a			=> DATA_RAM_Q_A(15 downto 8),
 		address_b	=> DATA_RAM_ADDR_B,
+		enable_b	=> '1',
+		cs_b		=> '1',
 		data_b		=> DI,
 		wren_b		=> not WR_N and DP_SEL and DP_ADDR(0),
 		q_b			=> DATA_RAM_Q_B(15 downto 8)
