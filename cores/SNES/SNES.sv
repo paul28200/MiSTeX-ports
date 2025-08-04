@@ -105,6 +105,10 @@ module emu
 	output        AUDIO_S,   // 1 - signed audio samples, 0 - unsigned
 	output  [1:0] AUDIO_MIX, // 0 - no mix, 1 - 25%, 2 - 50%, 3 - 100% (mono)
 
+	output		LRCK,
+	output 		BCK,
+	output		SDAT,
+
 	//ADC
 	inout   [3:0] ADC_BUS,
 
@@ -179,6 +183,14 @@ module emu
 
 //`define DEBUG_BUILD
 
+wire [63:0] status;
+wire code_index;
+wire code_download;
+wire cart_download;
+wire spc_download;
+reg bk_pending;
+reg osd_btn = 0;
+
 assign ADC_BUS  = 'Z;
 
 assign AUDIO_S   = 1;
@@ -199,6 +211,8 @@ wire       vcrop_en = status[39];
 wire [3:0] vcopt    = status[38:35];
 reg        en216p;
 reg  [4:0] voff;
+wire forced_scandoubler;
+wire scale;
 always @(posedge CLK_VIDEO) begin
 	en216p <= ((HDMI_WIDTH == 1920) && (HDMI_HEIGHT == 1080) && !forced_scandoubler && !scale);
 	voff <= (vcopt < 6) ? {vcopt,1'b0} : ({vcopt,1'b0} - 5'd24);
@@ -221,6 +235,8 @@ video_freak video_freak
 wire clock_locked;
 wire clk_mem;
 wire clk_sys;
+wire [63:0] reconfig_to_pll;
+wire [63:0] reconfig_from_pll;
 
 pll pll
 (
@@ -241,8 +257,6 @@ pll pll
 	assign DEBUG[3] = clock_locked;
 `endif
 
-wire [63:0] reconfig_to_pll;
-wire [63:0] reconfig_from_pll;
 wire        cfg_waitrequest;
 reg         cfg_write;
 reg   [5:0] cfg_address;
@@ -296,7 +310,12 @@ always @(posedge CLK_50M) begin
 end
 `endif // CYCLONEV
 
-wire reset = RESET | buttons[1] | status[0] | cart_download | spc_download | bk_loading | clearing_ram | msu_data_download;
+wire  [1:0] buttons = 0;
+reg  bk_loading = 0;
+reg  bk_state   = 0;
+reg clearing_ram = 0;
+wire msu_data_download;
+wire reset = RESET | buttons[1] | status[0] | ~clock_locked | cart_download | spc_download | bk_loading | clearing_ram | msu_data_download;
 
 ////////////////////////////  HPS I/O  //////////////////////////////////
 
@@ -366,10 +385,7 @@ parameter CONF_STR = {
 	"V,v",`BUILD_DATE
 };
 
-wire  [1:0] buttons;
-wire [63:0] status;
-wire [15:0] status_menumask = {en216p, !GUN_MODE, ~turbo_allow, ~gg_available, ~GSU_ACTIVE, ~bk_ena};
-wire        forced_scandoubler;
+wire [15:0] status_menumask;
 reg  [31:0] sd_lba;
 reg         sd_rd = 0;
 reg         sd_wr = 0;
@@ -394,8 +410,10 @@ wire [10:0] ps2_key;
 wire  [7:0] joy0_x,joy0_y,joy1_x,joy1_y;
 
 wire [64:0] RTC;
+wire [35:0] EXT_BUS;
 
 wire [21:0] gamma_bus;
+reg new_vmode;
 
 hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 (
@@ -453,15 +471,17 @@ wire       GSU_TURBO = status[18];
 wire       GSU_FASTROM = ~status[46];
 wire       BLEND = ~status[16];
 wire [1:0] mouse_mode = status[6:5];
+wire 	   piano;
 wire       joy_swap = status[7] | piano;
 wire [2:0] LHRom_type = status[3:1];
+//wire       SUFAMI_SWAP = status[31];
 
-wire code_index = &ioctl_index;
-wire code_download = ioctl_download & code_index;
-wire cart_download = ioctl_download & ioctl_index[5:0] == 0;
-wire spc_download = ioctl_download & ioctl_index[5:0] == 6'h01;
+assign code_index = &ioctl_index;
+assign code_download = ioctl_download & code_index;
+assign cart_download = ioctl_download & ioctl_index[5:0] == 0;
+assign spc_download = ioctl_download & ioctl_index[5:0] == 6'h01;
 
-reg new_vmode;
+reg        PAL;
 always @(posedge clk_sys) begin
 	reg old_pal;
 	int to;
@@ -479,7 +499,6 @@ end
 
 //////////////////////////  ROM DETECT  /////////////////////////////////
 
-reg        PAL;
 reg  [7:0] rom_type;
 reg [23:0] rom_mask, ram_mask;
 always @(posedge clk_sys) begin
@@ -536,7 +555,6 @@ always @(posedge clk_sys) begin
 	end
 end
 
-reg osd_btn = 0;
 always @(posedge clk_sys) begin
 	integer timeout = 0;
 	reg     has_bootrom = 0;
@@ -560,9 +578,78 @@ end
 
 wire GSU_ACTIVE;
 wire turbo_allow;
+wire SNES_SYSCLKR_CE,SNES_SYSCLKF_CE;
+wire SNES_REFRESH;
 
 reg [15:0] main_audio_l;
 reg [15:0] main_audio_r;
+
+reg [128:0] gg_code;
+wire gg_available;
+
+reg RESET_N = 0;
+
+wire[23:0] ROM_ADDR;
+wire       ROM_OE_N;
+wire       ROM_WE_N;
+wire       ROM_WORD;
+wire[15:0] ROM_D;
+wire[15:0] ROM_Q;
+
+wire[16:0] WRAM_ADDR;
+wire       WRAM_CE_N;
+wire       WRAM_OE_N;
+wire       WRAM_WE_N;
+wire [7:0] WRAM_Q, WRAM_D;
+
+wire [15:0] VRAM1_ADDR;
+wire        VRAM1_WE_N;
+wire  [7:0] VRAM1_D, VRAM1_Q;
+wire [15:0] VRAM2_ADDR;
+wire        VRAM2_WE_N;
+wire  [7:0] VRAM2_D, VRAM2_Q;
+wire [15:0] ARAM_ADDR;
+wire        ARAM_CE_N;
+wire        ARAM_WE_N;
+wire  [7:0] ARAM_Q, ARAM_D;
+wire [19:0] BSRAM_ADDR;
+wire        BSRAM_CE_N;
+wire        BSRAM_WE_N;
+wire  [7:0] BSRAM_Q, BSRAM_D;
+
+wire [7:0] R_out,G_out,B_out;
+wire HSYNC_out;
+wire VSYNC_out;
+wire HBlank_out;
+wire VBlank_out;
+wire DOTCLK_out;
+wire HIGH_RES;
+wire       JOY_STRB;
+wire       JOY1_CLK;
+wire       JOY1_P6;
+wire       JOY2_CLK;
+wire       JOY2_P6;
+wire [1:0] LG_DO;
+// JOYX_DO[0] is P4, JOYX_DO[1] is P5
+reg [1:0] JOY1_DI;
+reg [1:0] JOY2_DI;
+reg JOY2_P6_DI;
+wire [31:0] msu_data_addr;
+wire  [7:0] msu_data;
+wire        msu_data_ack;
+wire        msu_data_seek;
+wire        msu_data_req;
+wire [31:0] msu_data_base;
+wire FIELD,INTERLACE;
+
+wire        msu_track_mounting;
+wire        msu_track_missing;
+wire [15:0] msu_track_num;
+wire        msu_track_request;
+wire  [7:0] msu_volume;
+wire        msu_audio_repeat;
+wire        msu_audio_playing;
+wire        msu_audio_stop;
 
 main main
 (
@@ -574,6 +661,11 @@ main main
 	.GSU_ACTIVE(GSU_ACTIVE),
 	.GSU_TURBO(GSU_TURBO),
 	.GSU_FASTROM(GSU_FASTROM),
+//	.SUFAMI_SWAP(SUFAMI_SWAP),
+
+	.SYSCLKR_CE(SNES_SYSCLKR_CE),
+	.SYSCLKF_CE(SNES_SYSCLKF_CE),
+	.REFRESH(SNES_REFRESH),
 
 	.ROM_TYPE(rom_type),
 	.ROM_MASK(rom_mask),
@@ -598,6 +690,7 @@ main main
 	.WRAM_D(WRAM_D),
 	.WRAM_Q(WRAM_Q),
 	.WRAM_CE_N(WRAM_CE_N),
+	.WRAM_OE_N(WRAM_OE_N),
 	.WRAM_WE_N(WRAM_WE_N),
 
 	.VRAM1_ADDR(VRAM1_ADDR),
@@ -651,7 +744,7 @@ main main
 	.IO_ADDR(ioctl_addr[16:0]),
 	.IO_DAT(ioctl_dout),
 	.IO_WR(spc_download & ioctl_wr),
-	
+
 	.TURBO(status[4] & turbo_allow),
 	.TURBO_ALLOW(turbo_allow),
 	
@@ -677,30 +770,27 @@ main main
 	.MSU_DATA_ACK(msu_data_ack),
 	.MSU_DATA_SEEK(msu_data_seek),
 	.MSU_DATA_REQ(msu_data_req),
-	.MSU_ENABLE(msu_enable),
+//	.MSU_ENABLE(msu_enable),
+	.MSU_ENABLE(0),
 
 	.AUDIO_L(main_audio_l),
-	.AUDIO_R(main_audio_r)
+	.AUDIO_R(main_audio_r),
+
+	.LRCK(LRCK),
+	.BCK(BCK),
+	.SDAT(SDAT)
 );
 
-assign AUDIO_L = audio_l;
-assign AUDIO_R = audio_r;
-
-reg RESET_N = 0;
 reg RFSH = 0;
 always @(posedge clk_sys) begin
 	reg [1:0] div;
 	
 	div <= div + 1'd1;
 	RFSH <= !div;
-	
 	if (div == 2) RESET_N <= ~reset;
 end
 
 ////////////////////////////  CODES  ///////////////////////////////////
-
-reg [128:0] gg_code;
-wire gg_available;
 
 // Code layout:
 // {clock bit, code flags,     32'b address, 32'b compare, 32'b replace}
@@ -730,19 +820,24 @@ end
 
 ////////////////////////////  MEMORY  ///////////////////////////////////
 
-reg [16:0] mem_fill_addr;
-reg clearing_ram = 0;
+reg [17:0] mem_fill_addr;
+reg mem_fill_wait;
+reg old_downloading = 0;
 always @(posedge clk_sys) begin
 	if(~old_downloading & cart_download)
 		clearing_ram <= 1'b1;
 
 	if (&mem_fill_addr) clearing_ram <= 0;
 
-	if (clearing_ram)
-		mem_fill_addr <= mem_fill_addr + 1'b1;
-	else
+	if (clearing_ram) begin
+		mem_fill_wait <= ~mem_fill_wait;
+		if (mem_fill_wait) mem_fill_addr <= mem_fill_addr + 1'b1;
+	end else begin
 		mem_fill_addr <= 0;
+		mem_fill_wait <= 0;
+	end
 end
+wire mem_fill_we = clearing_ram & ~mem_fill_wait;
 
 reg [7:0] wram_fill_data;
 always @* begin
@@ -764,51 +859,49 @@ always @* begin
     endcase
 end
 
-wire[23:0] ROM_ADDR;
-wire       ROM_OE_N;
-wire       ROM_WE_N;
-wire       ROM_WORD;
-wire[15:0] ROM_D;
-wire[15:0] ROM_Q;
-
 wire[24:0] addr_download = ioctl_addr-10'd512;
+
+
+reg READ_PULSE;
+always @(posedge clk_sys)
+	READ_PULSE <= SNES_SYSCLKR_CE;
+wire [15:0] sdr_dout1;
 
 sdram sdram
 (
-	.*,
-	.init(0), //~clock_locked),
+	.SDRAM_CLK(SDRAM_CLK),
+	.SDRAM_A(SDRAM_A),
+	.SDRAM_BA(SDRAM_BA),
+	.SDRAM_DQ(SDRAM_DQ),
+	.SDRAM_DQML(SDRAM_DQML),
+	.SDRAM_DQMH(SDRAM_DQMH),
+	.SDRAM_nCS(SDRAM_nCS),
+	.SDRAM_nWE(SDRAM_nWE),
+	.SDRAM_nRAS(SDRAM_nRAS),
+	.SDRAM_nCAS(SDRAM_nCAS),
+	.SDRAM_CKE(SDRAM_CKE),
+		
+	.init(~clock_locked),
 	.clk(clk_mem),
 	
-	.addr(cart_download ? addr_download : ROM_ADDR),
-	.din(cart_download ? ioctl_dout : ROM_D),
-	.dout(ROM_Q),
-	.rd(~cart_download & (RESET_N ? ~ROM_OE_N : RFSH)),
-	.wr(cart_download ? ioctl_wr : ~ROM_WE_N),
-	.word(cart_download | ROM_WORD),
-	.busy()
+	.addr0(cart_download ? addr_download[23:0] : ROM_ADDR[21:0]),
+	.din0(cart_download ? ioctl_dout : ROM_D),
+	.dout0(ROM_Q),
+	.rd0(~cart_download & (RESET_N ? ~ROM_OE_N : RFSH)),
+	.wr0(cart_download ? ioctl_wr : ~ROM_WE_N),
+	.word0(cart_download | ROM_WORD),
+	
+	.addr1(clearing_ram ? {7'b0000000,mem_fill_addr} : {7'b0000000,WRAM_ADDR}),
+	.din1(clearing_ram ? {8'h00,wram_fill_data} : {8'h00,WRAM_D}),
+	.dout1(sdr_dout1),
+	.rd1(clearing_ram ? 1'b0 : ~WRAM_CE_N & ~WRAM_OE_N & READ_PULSE),
+	.wr1(clearing_ram ? mem_fill_we : ~WRAM_CE_N & ~WRAM_WE_N & SNES_SYSCLKF_CE),
+	.rfs1(clearing_ram ? 1'b0 : SNES_REFRESH),
+	.word1(0)
 );
 
-wire[16:0] WRAM_ADDR;
-wire       WRAM_CE_N;
-wire       WRAM_WE_N;
-wire [7:0] WRAM_Q, WRAM_D;
-dpram #(17)	wram
-(
-	.clock(clk_sys),
-	.address_a(WRAM_ADDR),
-	.data_a(WRAM_D),
-	.wren_a(~WRAM_CE_N & ~WRAM_WE_N),
-	.q_a(WRAM_Q),
+assign WRAM_Q = sdr_dout1[7:0];
 
-	// clear the RAM on loading
-	.address_b(mem_fill_addr[16:0]),
-	.data_b(wram_fill_data),
-	.wren_b(clearing_ram)
-);
-
-wire [15:0] VRAM1_ADDR;
-wire        VRAM1_WE_N;
-wire  [7:0] VRAM1_D, VRAM1_Q;
 dpram #(15)	vram1
 (
 	.clock(clk_sys),
@@ -816,15 +909,16 @@ dpram #(15)	vram1
 	.data_a(VRAM1_D),
 	.wren_a(~VRAM1_WE_N),
 	.q_a(VRAM1_Q),
+	.enable_a(1),
+	.cs_a(1),
 
 	// clear the RAM on loading
 	.address_b(mem_fill_addr[14:0]),
-	.wren_b(clearing_ram)
+	.wren_b(mem_fill_we),
+	.enable_b(1),
+	.cs_b(1)
 );
 
-wire [15:0] VRAM2_ADDR;
-wire        VRAM2_WE_N;
-wire  [7:0] VRAM2_D, VRAM2_Q;
 dpram #(15) vram2
 (
 	.clock(clk_sys),
@@ -832,60 +926,64 @@ dpram #(15) vram2
 	.data_a(VRAM2_D),
 	.wren_a(~VRAM2_WE_N),
 	.q_a(VRAM2_Q),
+	.enable_a(1),
+	.cs_a(1),
 
 	// clear the RAM on loading
 	.address_b(mem_fill_addr[14:0]),
-	.wren_b(clearing_ram)
+	.wren_b(mem_fill_we),
+	.enable_b(1),
+	.cs_b(1)
 );
 
-wire [15:0] ARAM_ADDR;
-wire        ARAM_CE_N;
-wire        ARAM_WE_N;
-wire  [7:0] ARAM_Q, ARAM_D;
 dpram_dif #(16,8,15,16) aram
 (
-	.clock(clk_sys),
+	.clock(~clk_sys),
 	.address_a(ARAM_ADDR),
 	.data_a(ARAM_D),
 	.wren_a(~ARAM_CE_N & ~ARAM_WE_N),
 	.q_A(ARAM_Q),
+	.enable_a(1),
+	.cs_a(1),
 
 	// clear the RAM on loading
 	.address_b(spc_download ? addr_download[15:1] : mem_fill_addr[15:1]),
 	.data_b(spc_download ? ioctl_dout : {2{aram_fill_data}}),
-	.wren_b(spc_download ? ioctl_wr : clearing_ram)
+	.wren_b(spc_download ? ioctl_wr : mem_fill_we),
+	.enable_b(1),
+	.cs_b(1)
 );
 
-localparam  BSRAM_BITS = 17; // 1Mbits
-wire [19:0] BSRAM_ADDR;
-wire        BSRAM_CE_N;
-wire        BSRAM_WE_N;
-wire  [7:0] BSRAM_Q, BSRAM_D;
+localparam  BSRAM_BITS = 17; // 512kbits
+
 dpram_dif #(BSRAM_BITS,8,BSRAM_BITS-1,16) bsram 
 (
 	.clock(clk_sys),
 
 	//Thrash the BSRAM upon ROM loading
-	.address_a(clearing_ram ? mem_fill_addr[BSRAM_BITS-1:0] : BSRAM_ADDR[BSRAM_BITS-1:0]),
-	.data_a(clearing_ram ? 8'hFF : BSRAM_D),
-	.wren_a(clearing_ram ? 1'b1 : ~BSRAM_CE_N & ~BSRAM_WE_N),
+	.address_a(mem_fill_we ? mem_fill_addr[BSRAM_BITS-1:0] : BSRAM_ADDR[BSRAM_BITS-1:0]),
+	.data_a(mem_fill_we ? 8'hFF : BSRAM_D),
+	.wren_a(mem_fill_we ? 1'b1 : ~BSRAM_CE_N & ~BSRAM_WE_N),
 	.q_a(BSRAM_Q),
+	.enable_a(1),
+	.cs_a(1),
 
 	.address_b({sd_lba[BSRAM_BITS-10:0],sd_buff_addr}),
 	.data_b(sd_buff_dout),
 	.wren_b(sd_buff_wr & sd_ack),
-	.q_b(sd_buff_din)
+	.q_b(sd_buff_din),
+	.enable_b(1),
+	.cs_b(1)
 );
 
 ////////////////////////////  VIDEO  ////////////////////////////////////
 
-wire [7:0] R_out,G_out,B_out;
-wire HSYNC_out;
-wire VSYNC_out;
-wire HBlank_out;
-wire VBlank_out;
-wire DOTCLK_out;
-
+reg  DOTCLK;
+reg  [7:0] R,G,B;
+reg  HSync, HSYNC;
+reg  VSync, VSYNC;
+reg  HBlank;
+reg  VBlank;
 always @(posedge clk_sys) begin
 	DOTCLK <= DOTCLK_out;
 	if(DOTCLK ^ DOTCLK_out) begin
@@ -899,17 +997,9 @@ always @(posedge clk_sys) begin
 	end
 end
 
-reg  [7:0] R,G,B;
-wire FIELD,INTERLACE;
-reg  HSync, HSYNC;
-reg  VSync, VSYNC;
-reg  HBlank;
-reg  VBlank;
-wire HIGH_RES;
-reg  DOTCLK;
-
 reg interlace;
 reg ce_pix;
+wire scandoubler;
 always @(posedge CLK_VIDEO) begin
 	reg [2:0] pcnt;
 	reg old_vsync;
@@ -934,12 +1024,14 @@ always @(posedge CLK_VIDEO) begin
 	if(pcnt==3) {HSync, VSync} <= {HSYNC, VSYNC};
 end
 
+wire [2:0] sl = scale ? scale - 1'd1 : 3'd0;
+assign scale = status[11:9];
 assign VGA_F1 = interlace & FIELD;
 assign VGA_SL = {~interlace,~interlace}&sl[1:0];
+assign       scandoubler = ~interlace && (scale || forced_scandoubler);
 
-wire [2:0] scale = status[11:9];
-wire [2:0] sl = scale ? scale - 1'd1 : 3'd0;
-wire       scandoubler = ~interlace && (scale || forced_scandoubler);
+wire [2:0] LG_TARGET;
+wire       LG_T;
 
 video_mixer #(.LINE_LENGTH(520), .GAMMA(1)) video_mixer
 (
@@ -954,10 +1046,11 @@ video_mixer #(.LINE_LENGTH(520), .GAMMA(1)) video_mixer
 
 ////////////////////////////  I/O PORTS  ////////////////////////////////
 
+wire raw_serial;
 assign {UART_RTS, UART_DTR} = 1;
 wire [15:0] uart_data;
 wire piano_joypad_do;
-wire piano = status[43];
+assign piano = status[43];
 miraclepiano miracle(
 	.clk(clk_sys),
 	.reset(reset || !piano),
@@ -968,13 +1061,9 @@ miraclepiano miracle(
 	.txd(UART_TXD),
 	.rxd(UART_RXD)
 );
+wire [1:0] JOY1_DO_t;
 wire [1:0] JOY1_DO = piano ? {1'b1,piano_joypad_do} : JOY1_DO_t;
 
-wire       JOY_STRB;
-
-wire [1:0] JOY1_DO_t;
-wire       JOY1_CLK;
-wire       JOY1_P6;
 ioport port1
 (
 	.CLK(clk_sys),
@@ -991,8 +1080,6 @@ ioport port1
 );
 
 wire [1:0] JOY2_DO;
-wire       JOY2_CLK;
-wire       JOY2_P6;
 ioport port2
 (
 	.CLK(clk_sys),
@@ -1014,9 +1101,8 @@ ioport port2
 );
 
 wire       LG_P6_out;
-wire [1:0] LG_DO;
-wire [2:0] LG_TARGET;
-wire       LG_T = ((GUN_MODE[0]&joy0[6]) | (GUN_MODE[1]&joy1[6])); // always from joysticks
+
+assign LG_T = ((GUN_MODE[0]&joy0[6]) | (GUN_MODE[1]&joy1[6])); // always from joysticks
 
 lightgun lightgun
 (
@@ -1060,7 +1146,7 @@ lightgun lightgun
 // 5  IN    P1D0        RX-
 // 6  IN    P2D0        TX+
 
-wire raw_serial = status[8];
+assign raw_serial = status[8];
 reg snac_p2 = 0;
 
 assign USER_OUT[2] = 1'b1;
@@ -1069,11 +1155,6 @@ assign USER_OUT[6] = 1'b1;
 
 wire  [1:0] datajoy0_DI = snac_p2 ? {1'b1, USER_IN[6]} : JOY1_DO;
 wire  [1:0] datajoy1_DI = snac_p2 ? {USER_IN[2], USER_IN[6]} : JOY2_DO;
-
-// JOYX_DO[0] is P4, JOYX_DO[1] is P5
-reg [1:0] JOY1_DI;
-reg [1:0] JOY2_DI;
-reg JOY2_P6_DI;
 
 always @(posedge clk_sys) begin
 	if (raw_serial) begin
@@ -1107,7 +1188,7 @@ end
 /////////////////////////  STATE SAVE/LOAD  /////////////////////////////
 
 wire bk_save_write = ~BSRAM_CE_N & ~BSRAM_WE_N;
-reg bk_pending;
+reg bk_ena = 0;
 
 always @(posedge clk_sys) begin
 	if (bk_ena && ~OSD_STATUS && bk_save_write)
@@ -1116,8 +1197,6 @@ always @(posedge clk_sys) begin
 		bk_pending <= 1'b0;
 end
 
-reg bk_ena = 0;
-reg old_downloading = 0;
 always @(posedge clk_sys) begin
 	old_downloading <= cart_download;
 	if(~old_downloading & cart_download) bk_ena <= 0;
@@ -1128,8 +1207,6 @@ end
 
 wire bk_load    = status[12];
 wire bk_save    = status[13] | (bk_pending & OSD_STATUS && status[23]);
-reg  bk_loading = 0;
-reg  bk_state   = 0;
 
 always @(posedge clk_sys) begin
 	reg old_load = 0, old_save = 0, old_ack;
@@ -1169,6 +1246,8 @@ always @(posedge clk_sys) begin
 	end
 end
 
+assign status_menumask = {en216p, !GUN_MODE, ~turbo_allow, ~gg_available, ~GSU_ACTIVE, ~bk_ena};
+
 //debug
 `ifdef DEBUG_BUILD
 reg [4:0] DBG_BG_EN = '1;
@@ -1199,44 +1278,34 @@ end
 
 wire msu_enable;
 wire msu_audio_download = ioctl_download & ioctl_index[5:0] == 6'h02;
-wire msu_data_download  = ioctl_download & ioctl_index[5:0] == 6'h03;
+assign msu_data_download  = ioctl_download & ioctl_index[5:0] == 6'h03;
 
 // EXT bus is used to communicate with the HPS for MSU functionality
-wire [35:0] EXT_BUS;
-hps_ext hps_ext
-(
-	.reset(reset),
-	.clk_sys(clk_sys),
-	.EXT_BUS(EXT_BUS),
 
-	.msu_enable(msu_enable),
+//hps_ext hps_ext
+//(
+//	.reset(reset),
+//	.clk_sys(clk_sys),
+//	.EXT_BUS(EXT_BUS),
 
-	.msu_track_mounting(msu_track_mounting),
-	.msu_track_missing(msu_track_missing),
-	.msu_track_num(msu_track_num),
-	.msu_track_request(msu_track_request),
+//	.msu_enable(msu_enable),
 
-	.msu_audio_size(msu_audio_size),
-	.msu_audio_ack(msu_audio_ack),
-	.msu_audio_req(msu_audio_req),
-	.msu_audio_seek(msu_audio_seek),
-	.msu_audio_sector(msu_audio_sector),
-	.msu_audio_download(msu_audio_download),
+//	.msu_track_mounting(msu_track_mounting),
+//	.msu_track_missing(msu_track_missing),
+//	.msu_track_num(msu_track_num),
+//	.msu_track_request(msu_track_request),
 
-	.msu_data_base(msu_data_base)
-);
+//	.msu_audio_size(msu_audio_size),
+//	.msu_audio_ack(msu_audio_ack),
+//	.msu_audio_req(msu_audio_req),
+//	.msu_audio_seek(msu_audio_seek),
+//	.msu_audio_sector(msu_audio_sector),
+//	.msu_audio_download(msu_audio_download),
 
-wire        msu_track_mounting;
-wire        msu_track_missing;
-wire [15:0] msu_track_num;
-wire        msu_track_request;
+//	.msu_data_base(msu_data_base)
+//);
+
 wire [31:0] msu_audio_size;
-
-wire  [7:0] msu_volume;
-wire        msu_audio_repeat;
-wire        msu_audio_playing;
-wire        msu_audio_stop;
-
 wire        msu_audio_ack;
 wire        msu_audio_req;
 wire        msu_audio_seek;
@@ -1245,33 +1314,33 @@ wire [21:0] msu_audio_sector;
 wire [15:0] msu_l;
 wire [15:0] msu_r;
 
-msu_audio msu_audio
-(
-	.reset(reset),
+//msu_audio msu_audio
+//(
+//	.reset(reset),
 
-	.clk(clk_sys),
-	.clk_rate(PAL ? 21281370 : 21477270),
+//	.clk(clk_sys),
+//	.clk_rate(PAL ? 21281370 : 21477270),
 
-	.ctl_volume(msu_volume),
-	.ctl_stop(msu_audio_stop),
-	.ctl_play(msu_audio_playing),
-	.ctl_repeat(msu_audio_repeat),
+//	.ctl_volume(msu_volume),
+//	.ctl_stop(msu_audio_stop),
+//	.ctl_play(msu_audio_playing),
+//	.ctl_repeat(msu_audio_repeat),
 
-	.track_size(msu_audio_size),
-	.track_processing(msu_track_missing | msu_track_mounting | msu_track_request),
+//	.track_size(msu_audio_size),
+//	.track_processing(msu_track_missing | msu_track_mounting | msu_track_request),
 
-	.audio_download(msu_audio_download),
-	.audio_data(ioctl_dout),
-	.audio_data_wr(ioctl_wr),
+//	.audio_download(msu_audio_download),
+//	.audio_data(ioctl_dout),
+//	.audio_data_wr(ioctl_wr),
 
-	.audio_ack(msu_audio_ack),
-	.audio_sector(msu_audio_sector),
-	.audio_req(msu_audio_req),
-	.audio_seek(msu_audio_seek),
+//	.audio_ack(msu_audio_ack),
+//	.audio_sector(msu_audio_sector),
+//	.audio_req(msu_audio_req),
+//	.audio_seek(msu_audio_seek),
 
-	.audio_l(msu_l),
-	.audio_r(msu_r)
-);
+//	.audio_l(msu_l),
+//	.audio_r(msu_r)
+//);
 
 reg [15:0] audio_l, audio_r;
 
@@ -1285,24 +1354,20 @@ always @(posedge clk_sys) begin
 	audio_r <= (^mix_r[16:15]) ? {mix_r[16], {15{mix_r[15]}}} : mix_r[15:0];
 end
 
-wire [31:0] msu_data_addr;
-wire  [7:0] msu_data;
-wire        msu_data_ack;
-wire        msu_data_seek;
-wire        msu_data_req;
-wire [31:0] msu_data_base;
+assign AUDIO_L = audio_l;
+assign AUDIO_R = audio_r;
 
 assign DDRAM_CLK = clk_mem;
 
-msu_data_store msu_data_store
-(
-	.*,
-	.rd_next(msu_data_req),
-	.rd_seek(msu_data_seek),
-	.rd_seek_done(msu_data_ack),
-	.rd_addr(msu_data_addr),
-	.rd_dout(msu_data),
-	.base_addr(msu_data_base)
-);
+//msu_data_store msu_data_store
+//(
+//	.*,
+//	.rd_next(msu_data_req),
+//	.rd_seek(msu_data_seek),
+//	.rd_seek_done(msu_data_ack),
+//	.rd_addr(msu_data_addr),
+//	.rd_dout(msu_data),
+//	.base_addr(msu_data_base)
+//);
 
 endmodule
