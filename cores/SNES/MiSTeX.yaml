@@ -10,14 +10,12 @@ sourcedirs:
   - upstream/rtl
   - upstream/rtl/65C816
   - upstream/rtl/chip
+  - upstream/rtl/chip/DSP
   - upstream/rtl/chip/CX4
   - upstream/rtl/chip/MSU1
   - upstream/rtl/chip/BSX
-  - upstream/rtl/chip/SA1
-  - upstream/rtl/chip/DSP
   - upstream/rtl/chip/SPC7110
   - upstream/rtl/chip/SDD1
-  - upstream/rtl/chip/GSU
   - upstream/rtl/SPC700
   - upstream/rtl/65C816
 
@@ -53,27 +51,35 @@ vivado:
   sourcefiles:
 
     - rtl/cheatcodes.sv
-    - rtl/chip/BSX/BSX_BS.vhd
-    - rtl/chip/CX4/cx4cache.vhd
-    - rtl/chip/CX4/CX4Map.vhd
-    - rtl/chip/CX4/CX4.vhd
-    - rtl/chip/DSP/DSPn.vhd
-    - rtl/chip/GSU/GSU.vhd
-    - rtl/chip/MSU1/msu_audio.v
-    - rtl/chip/MSU1/MSU.sv
-    - rtl/chip/SPC7110/SPC7110_DEC.vhd
     - rtl/dpram_difclk.vhd
     - rtl/dpram_dif.vhd
     - rtl/dpram.vhd
     - rtl/hps_ext.v
     - rtl/lightgun.sv
+    - rtl/main.v
     - rtl/msu_fifo.v
     - rtl/pll_0002-xilinx7.v
     - rtl/sdram.sv
+    - rtl/SMP.vhd
+    - rtl/SNES.vhd
     - rtl/spram_sz.vhd
     - rtl/spram.vhd
+    - rtl/DSP.vhd
+    - rtl/PPU.vhd
+    - rtl/PPU_PKG.vhd
     - sys/pll_audio_0002-xilinx7.v
     - sys/pll_hdmi_0002-xilinx7.v
     - sys/sys_top.xdc
+    - SNES.xdc
     - sys/xilinx7_mmcm_reconfig.v
     - sys/xilinx_pll_reconfig_top.v
+    - rtl/chip/DSP/DSPn.vhd
+    - rtl/chip/GSU/GSU.vhd
+    - rtl/chip/GSU/GSUMap.vhd
+    - rtl/chip/GSU/GSU_PKG.vhd
+    - rtl/chip/SA1/SA1.vhd
+    - rtl/chip/SA1/divider.vhd
+    - rtl/chip/SA1/pll_sa1-xilinx7.v
+    - rtl/chip/SA1/SA1DIV_A7T.vhd
+    - rtl/chip/SA1/SA1MULT_A7T.vhd
+    - upstream/rtl/chip/SA1/SA1Map.vhd
