@@ -14,6 +14,7 @@ sourcedirs:
   - upstream/rtl/chip/CX4
   - upstream/rtl/chip/MSU1
   - upstream/rtl/chip/BSX
+  - upstream/rtl/chip/GSU
   - upstream/rtl/chip/SPC7110
   - upstream/rtl/chip/SDD1
   - upstream/rtl/SPC700
